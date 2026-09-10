@@ -35,6 +35,11 @@ function readWithIdleTimeout(reader, timeoutMs) {
 async function fetchWithTimeout(url, options = {}, timeoutMs = 15_000) {
   const controller = new AbortController();
   const inheritedSignal = options.signal;
+
+  if (inheritedSignal?.aborted) {
+    throw new DOMException('Generation stopped.', 'AbortError');
+  }
+
   const abortFromCaller = () => controller.abort(inheritedSignal?.reason);
   const timer = window.setTimeout(() => controller.abort(new DOMException('Request timed out', 'TimeoutError')), timeoutMs);
 
@@ -42,7 +47,10 @@ async function fetchWithTimeout(url, options = {}, timeoutMs = 15_000) {
   try {
     return await fetch(url, { ...options, cache: 'no-store', signal: controller.signal });
   } catch (error) {
-    if (controller.signal.aborted && !inheritedSignal?.aborted) {
+    if (inheritedSignal?.aborted) {
+      throw new DOMException('Generation stopped.', 'AbortError');
+    }
+    if (controller.signal.aborted) {
       throw new Error('The local server took too long to respond. Please check the backend and try again.', { cause: error });
     }
     throw error;
@@ -57,11 +65,17 @@ async function requestJson(path, options = {}, { timeoutMs = 15_000, retry = fal
   let lastError;
 
   for (let attempt = 0; attempt < attempts; attempt += 1) {
+    if (options.signal?.aborted) {
+      throw new DOMException('Generation stopped.', 'AbortError');
+    }
     try {
       const response = await fetchWithTimeout(apiUrl(path), options, timeoutMs);
       if (!response.ok) throw new Error(await getErrorMessage(response));
       return response.json();
     } catch (error) {
+      if (options.signal?.aborted || error.name === 'AbortError') {
+        throw new DOMException('Generation stopped.', 'AbortError');
+      }
       lastError = error;
       if (attempt < attempts - 1) await wait(300);
     }
@@ -102,7 +116,7 @@ export function ingestKnowledgeBase(paths) {
   });
 }
 
-export async function uploadKnowledgeBase(files) {
+export async function uploadKnowledgeBase(files, { signal } = {}) {
   const formData = new FormData();
   for (const file of files) {
     formData.append('files', file);
@@ -110,16 +124,18 @@ export async function uploadKnowledgeBase(files) {
   const response = await fetchWithTimeout(apiUrl('/knowledge-base/upload'), {
     method: 'POST',
     body: formData,
+    signal,
   }, 60_000);
   if (!response.ok) throw new Error(await getErrorMessage(response));
   return response.json();
 }
 
-export function askAboutImage(query, image_b64) {
+export function askAboutImage(query, image_b64, { signal } = {}) {
   return requestJson('/ask/image', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ query, image_b64 }),
+    signal,
   });
 }
 
@@ -143,6 +159,21 @@ export async function streamQuestion(query, { signal, onEvent }) {
   const decoder = new TextDecoder();
   let buffer = '';
 
+  const onAbort = () => {
+    try {
+      reader.cancel(new DOMException('Generation stopped.', 'AbortError'));
+    } catch {
+      // Stream may already be closed
+    }
+  };
+
+  if (signal?.aborted) {
+    onAbort();
+    throw new DOMException('Generation stopped.', 'AbortError');
+  }
+
+  signal?.addEventListener('abort', onAbort, { once: true });
+
   const processLine = (line) => {
     if (!line.trim()) return;
     try {
@@ -154,7 +185,13 @@ export async function streamQuestion(query, { signal, onEvent }) {
 
   try {
     while (true) {
+      if (signal?.aborted) {
+        throw new DOMException('Generation stopped.', 'AbortError');
+      }
       const { done, value } = await readWithIdleTimeout(reader, 90_000);
+      if (signal?.aborted) {
+        throw new DOMException('Generation stopped.', 'AbortError');
+      }
       buffer += decoder.decode(value || new Uint8Array(), { stream: !done });
       const lines = buffer.split(/\r?\n/);
       buffer = lines.pop() || '';
@@ -163,6 +200,7 @@ export async function streamQuestion(query, { signal, onEvent }) {
     }
     processLine(buffer);
   } finally {
+    signal?.removeEventListener('abort', onAbort);
     try {
       await reader.cancel();
     } catch {

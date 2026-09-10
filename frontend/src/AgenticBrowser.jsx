@@ -14,7 +14,7 @@ const CHAT_STORAGE_KEY = 'agent-otg-client-chats-v1';
 const ACTIVE_CHAT_STORAGE_KEY = 'agent-otg-active-chat-v1';
 const TITLE_STORAGE_KEY = 'agent-otg-history-titles-v1';
 const HIDDEN_SESSIONS_STORAGE_KEY = 'agent-otg-hidden-sessions-v1';
-const SESSION_TITLE_CACHE_KEY = 'agent-otg-session-title-cache-v2';
+const SESSION_TITLE_CACHE_KEY = 'agent-otg-session-title-cache-v3';
 const PINNED_HISTORY_KEY = 'agent-otg-pinned-history-v1';
 const RAG_MEMORY_KEY = 'agent-otg-rag-memory-v1';
 const HISTORY_PAGE_SIZE = 8;
@@ -23,7 +23,7 @@ const STOP_WORDS = new Set([
   'a', 'about', 'an', 'and', 'are', 'as', 'at', 'be', 'by', 'can', 'create',
   'clear', 'content', 'document', 'excel', 'file', 'for', 'from', 'generate',
   'give', 'how', 'i', 'in', 'is', 'it', 'make', 'me', 'my', 'of', 'on', 'or',
-  'pdf', 'please', 'professional', 'sheet', 'structured', 'that', 'the', 'this',
+  'pdf', 'please', 'powerpoint', 'presentation', 'professional', 'sheet', 'spreadsheet', 'structured', 'that', 'the', 'this',
   'title', 'to', 'use', 'want', 'well', 'what', 'when', 'where', 'which', 'who',
   'why', 'with', 'word', 'write', 'you', 'your', 'does', 'hello', 'tell', 'than',
 ]);
@@ -137,7 +137,7 @@ function attachmentContext(selectedAttachments, ragMemory) {
     .slice(0, 16_000);
 }
 
-function buildSubmissionPrompt(prompt, activeFilter, mode, messages = [], fileContext = '') {
+function buildSubmissionPrompt(prompt, activeFilter, mode, messages = [], fileContext = '', useKnowledgeBase = false) {
   const cleanPrompt = prompt.trim();
   if (mode === 'chief') return `/complex ${cleanPrompt}`;
   const context = isReferenceRequest(cleanPrompt) ? conversationContext(messages) : '';
@@ -154,6 +154,9 @@ function buildSubmissionPrompt(prompt, activeFilter, mode, messages = [], fileCo
   const parts = [documentInstruction];
   if (context) parts.push(`Earlier user context:\n${context}`);
   if (fileContext) parts.push(`Selected file context:\n${fileContext}`);
+  if (useKnowledgeBase && !activeFilter) {
+    parts.push('Answer from the uploaded knowledge base as the primary source. Ground the answer in those files and name the source files you used.');
+  }
   return parts.join('\n\n');
 }
 
@@ -169,6 +172,7 @@ function describeStage(stage) {
     plan: 'Execution plan',
     routing: 'Model routing',
     attachments: 'Knowledge retrieval',
+    availability: 'Availability check',
     vision: 'Vision analysis',
     working: 'Tool orchestration',
     generating: 'Response generation',
@@ -281,7 +285,6 @@ function FormattedAnswer({ content, copiedId, onCopied, messageId }) {
 }
 
 function AssistantMessage({ message, copiedId, onCopied }) {
-  const [detailsOpen, setDetailsOpen] = useState(Boolean(message.streaming));
   const stages = message.stages || [];
   const sources = message.meta?.sources || [];
   const artifact = message.meta?.artifact;
@@ -297,19 +300,9 @@ function AssistantMessage({ message, copiedId, onCopied }) {
       </div>
 
       {stages.length > 0 && (
-        <div className="mb-3 rounded-xl border border-[#ff6700]/15 bg-black/25 px-3 py-2.5">
-          <button type="button" onClick={() => setDetailsOpen((open) => !open)} className="flex w-full items-center justify-between gap-3 text-left text-xs text-orange-100">
-            <span className="flex min-w-0 items-center gap-2">
-              {message.streaming ? <LoaderCircle className="h-3.5 w-3.5 shrink-0 animate-spin text-[#ff6700]" /> : message.error ? <AlertTriangle className="h-3.5 w-3.5 shrink-0 text-red-400" /> : <Check className="h-3.5 w-3.5 shrink-0 text-emerald-400" />}
-              <span className="truncate"><span className="font-medium text-orange-50">{describeStage(stages.at(-1)).title}</span> · {describeStage(stages.at(-1)).detail}</span>
-            </span>
-            <ChevronDown className={`h-4 w-4 shrink-0 transition-transform ${detailsOpen ? 'rotate-180' : ''}`} />
-          </button>
-          {detailsOpen && (
-            <ol className="mt-2 space-y-1.5 border-t border-white/5 pt-2 text-xs text-gray-400">
-              {stages.map((stage, index) => <li key={`${message.id}-stage-${index}`} className="flex gap-2"><span className="text-[#ff6700]">{index + 1}.</span><span><span className="font-medium text-gray-200">{describeStage(stage).title}</span> — {describeStage(stage).detail}</span></li>)}
-            </ol>
-          )}
+        <div className="mb-3 flex min-w-0 items-center gap-2 rounded-xl border border-[#ff6700]/15 bg-black/25 px-3 py-2.5 text-xs text-orange-100" role="status" aria-live="polite">
+          {message.streaming ? <LoaderCircle className="h-3.5 w-3.5 shrink-0 animate-spin text-[#ff6700]" /> : message.error ? <AlertTriangle className="h-3.5 w-3.5 shrink-0 text-red-400" /> : <Check className="h-3.5 w-3.5 shrink-0 text-emerald-400" />}
+          <span className="truncate"><span className="font-medium text-orange-50">{describeStage(stages.at(-1)).title}</span> · {describeStage(stages.at(-1)).detail}</span>
         </div>
       )}
 
@@ -387,6 +380,7 @@ export default function AgentOTG() {
   const searchInputRef = useRef(null);
   const abortControllerRef = useRef(null);
   const messageEndRef = useRef(null);
+  const scrollContainerRef = useRef(null);
   const hydratingSessionIdsRef = useRef(new Set());
   const activeChat = chats.find((chat) => chat.id === activeChatId) || chats[0];
 
@@ -439,6 +433,38 @@ export default function AgentOTG() {
       }
     }
   }, [sessionTitleCache, titleOverrides]);
+
+  const handleNewChat = useCallback(() => {
+    if (isProcessing) return;
+
+    setAttachments([]);
+    setRagMemory([]);
+    writeStoredJson(RAG_MEMORY_KEY, []);
+    setInput('');
+    setActiveFilter(null);
+    setAttachmentNotice('');
+
+    setChats((currentChats) => {
+      const active = currentChats.find((chat) => chat.id === activeChatId);
+      if (active && active.messages.length === 0) {
+        return currentChats;
+      }
+      const newChat = createChat();
+      setActiveChatId(newChat.id);
+      return [...currentChats, newChat];
+    });
+
+    textareaRef.current?.focus();
+
+    resetConversation()
+      .then(() => {
+        setApiStatus('online');
+        void loadServerSessions();
+      })
+      .catch(() => {
+        // Local chat creation still works if backend is restarting.
+      });
+  }, [activeChatId, isProcessing, loadServerSessions]);
 
   useEffect(() => { writeStoredJson(CHAT_STORAGE_KEY, chats); }, [chats]);
   useEffect(() => { if (activeChatId) window.localStorage.setItem(ACTIVE_CHAT_STORAGE_KEY, activeChatId); }, [activeChatId]);
@@ -500,18 +526,22 @@ export default function AgentOTG() {
       const modifier = event.ctrlKey || event.metaKey;
       if (modifier && event.key.toLowerCase() === 'n') {
         event.preventDefault();
-        if (!isProcessing) void handleNewChat();
+        event.stopPropagation();
+        if (!isProcessing) handleNewChat();
       }
       if (modifier && event.key.toLowerCase() === 'k') {
         event.preventDefault();
+        event.stopPropagation();
         setIsSearchOpen(true);
       }
       if (modifier && event.key === '/') {
         event.preventDefault();
+        event.stopPropagation();
         textareaRef.current?.focus();
       }
       if (modifier && event.shiftKey && event.key.toLowerCase() === 'm') {
         event.preventDefault();
+        event.stopPropagation();
         selectMode(mode === 'agent' ? 'chief' : 'agent');
       }
       if (event.key === 'Escape') {
@@ -521,13 +551,17 @@ export default function AgentOTG() {
         setEditingHistoryId(null);
       }
     };
-    window.addEventListener('keydown', shortcut);
-    return () => window.removeEventListener('keydown', shortcut);
-  });
+    window.addEventListener('keydown', shortcut, true);
+    return () => window.removeEventListener('keydown', shortcut, true);
+  }, [handleNewChat, isProcessing, mode]);
 
   useEffect(() => { if (isSearchOpen) window.setTimeout(() => searchInputRef.current?.focus(), 0); }, [isSearchOpen]);
   const lastMessageContent = activeChat?.messages.at(-1)?.content;
-  useEffect(() => { messageEndRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' }); }, [activeChat?.messages.length, lastMessageContent]);
+  useEffect(() => {
+    const container = scrollContainerRef.current;
+    if (!container) return;
+    container.scrollTo({ top: container.scrollHeight, behavior: isProcessing ? 'auto' : 'smooth' });
+  }, [activeChat?.messages.length, isProcessing, lastMessageContent]);
   useEffect(() => {
     if (!copiedId) return undefined;
     const timer = window.setTimeout(() => setCopiedId(null), 1500);
@@ -589,14 +623,25 @@ export default function AgentOTG() {
     }
   }
 
-  async function tryIngestAttachments(chatId, messageId, selectedAttachments) {
+  async function tryIngestAttachments(chatId, messageId, selectedAttachments, signal) {
     if (!selectedAttachments.length) return;
     appendStage(chatId, messageId, { label: 'attachments', detail: `Indexing ${selectedAttachments.length} file${selectedAttachments.length === 1 ? '' : 's'} in knowledge base…` });
 
     // Attempt backend file upload (works for browser File objects)
     try {
-      const res = await uploadKnowledgeBase(selectedAttachments);
+      const res = await uploadKnowledgeBase(selectedAttachments, { signal });
       const totalIndexed = res.files_indexed || selectedAttachments.length;
+      setRagMemory((current) => {
+        const additions = selectedAttachments.map((file) => ({
+          key: `${file.name}-${file.size}-${file.lastModified}`,
+          name: file.name,
+          text: '',
+          indexed: true,
+          updatedAt: new Date().toISOString(),
+        }));
+        const retained = current.filter((entry) => !additions.some((next) => next.key === entry.key));
+        return [...retained, ...additions].slice(-24);
+      });
       appendStage(chatId, messageId, { label: 'attachments', detail: `Indexed ${totalIndexed} file${totalIndexed === 1 ? '' : 's'} into ChromaDB knowledge base.` });
       setAttachmentNotice('');
       return;
@@ -638,7 +683,14 @@ export default function AgentOTG() {
     const prompt = input.trim();
     const selectedAttachments = [...attachments];
     const selectedFilter = activeFilter;
-    const requestPrompt = buildSubmissionPrompt(prompt, selectedFilter, mode, activeChat.messages, attachmentContext(selectedAttachments, ragMemory));
+    const requestPrompt = buildSubmissionPrompt(
+      prompt,
+      selectedFilter,
+      mode,
+      activeChat.messages,
+      attachmentContext(selectedAttachments, ragMemory),
+      selectedAttachments.length > 0 || ragMemory.some((entry) => entry.indexed),
+    );
     const chatId = activeChat.id;
     const userMessage = {
       id: createId('message'), role: 'user', content: prompt, createdAt: new Date().toISOString(),
@@ -668,17 +720,19 @@ export default function AgentOTG() {
     setAttachmentNotice('');
     setIsProcessing(true);
     if (textareaRef.current) textareaRef.current.style.height = 'auto';
+    const controller = new AbortController();
+    abortControllerRef.current = controller;
 
     try {
       if (mode === 'agent' && selectedAttachments.length === 1 && isImageFile(selectedAttachments[0]) && !selectedFilter) {
         appendStage(chatId, assistantMessage.id, { label: 'vision', detail: 'Analyzing the attached image with Qwen VL…' });
         const image_b64 = await fileToBase64(selectedAttachments[0]);
-        const result = await askAboutImage(prompt, image_b64);
+        if (controller.signal.aborted) throw new DOMException('Generation stopped.', 'AbortError');
+        const result = await askAboutImage(prompt, image_b64, { signal: controller.signal });
         patchAssistantMessage(chatId, assistantMessage.id, { content: result.answer || 'Image analysis completed.', streaming: false, meta: { modelUsed: result.model_used, timeSeconds: result.time_seconds } });
       } else {
-        if (mode === 'agent') await tryIngestAttachments(chatId, assistantMessage.id, selectedAttachments);
-        const controller = new AbortController();
-        abortControllerRef.current = controller;
+        if (mode === 'agent') await tryIngestAttachments(chatId, assistantMessage.id, selectedAttachments, controller.signal);
+        if (controller.signal.aborted) throw new DOMException('Generation stopped.', 'AbortError');
         let streamError = '';
         await streamQuestion(requestPrompt, {
           signal: controller.signal,
@@ -715,37 +769,18 @@ export default function AgentOTG() {
       setApiStatus('online');
       void associateBackendSession(chatId);
     } catch (error) {
-      const wasCancelled = error.name === 'AbortError';
+      const wasCancelled = controller.signal.aborted || error.name === 'AbortError';
       const errorMessage = wasCancelled ? 'Generation stopped.' : friendlyErrorMessage(error.message || error);
       patchAssistantMessage(chatId, assistantMessage.id, { streaming: false, error: errorMessage });
       if (!wasCancelled) setApiStatus(isModelConnectionError(errorMessage) ? 'degraded' : 'offline');
     } finally {
-      abortControllerRef.current = null;
+      if (abortControllerRef.current === controller) abortControllerRef.current = null;
       setIsProcessing(false);
     }
   }
 
   function handleStop() {
     abortControllerRef.current?.abort();
-  }
-
-  async function handleNewChat() {
-    if (isProcessing) return;
-    try {
-      await resetConversation();
-      setApiStatus('online');
-      void loadServerSessions();
-    } catch {
-      // Local chat creation still works while FastAPI is restarting.
-    }
-    const newChat = createChat();
-    setChats((currentChats) => [...currentChats, newChat]);
-    setActiveChatId(newChat.id);
-    setInput('');
-    setAttachments([]);
-    setActiveFilter(null);
-    setAttachmentNotice('');
-    textareaRef.current?.focus();
   }
 
   async function openHistoryItem(item) {
@@ -807,7 +842,7 @@ export default function AgentOTG() {
     event.target.value = '';
     const readable = selected.filter(isReadableTextFile);
     if (!readable.length) {
-      setAttachmentNotice('File selected. Images can be analyzed directly; PDF, Word, Excel, and PowerPoint files require a backend upload endpoint before this browser can add them to RAG memory.');
+      setAttachmentNotice('File selected. It will be indexed into the shared knowledge base when you send your message.');
       return;
     }
     try {
@@ -874,6 +909,10 @@ export default function AgentOTG() {
     } catch {
       // Clear the frontend list even if the API is unavailable.
     }
+    setAttachments([]);
+    setRagMemory([]);
+    writeStoredJson(RAG_MEMORY_KEY, []);
+    setAttachmentNotice('');
     setHiddenSessionIds(serverSessions.map((session) => session.session_name));
     const newChat = createChat();
     setChats([newChat]);
@@ -893,7 +932,7 @@ export default function AgentOTG() {
         </div>
 
         <div className="mt-2 flex min-w-[280px] flex-col gap-2 px-3">
-          <button type="button" onClick={() => void handleNewChat()} disabled={isProcessing} className="flex w-full items-center gap-3 rounded-xl bg-[#ff6700]/10 px-4 py-3 text-sm font-medium text-[#ff812b] transition-colors hover:bg-[#ff6700]/20 disabled:cursor-not-allowed disabled:opacity-50"><Plus className="h-5 w-5" />New chat <span className="ml-auto text-[10px] text-orange-200/60">Ctrl N</span></button>
+          <button type="button" onClick={handleNewChat} disabled={isProcessing} className="flex w-full items-center gap-3 rounded-xl bg-[#ff6700]/10 px-4 py-3 text-sm font-medium text-[#ff812b] transition-colors hover:bg-[#ff6700]/20 disabled:cursor-not-allowed disabled:opacity-50"><Plus className="h-5 w-5" />New chat <span className="ml-auto text-[10px] text-orange-200/60">Ctrl N</span></button>
           <button type="button" onClick={() => setIsSearchOpen(true)} className="flex w-full items-center gap-3 rounded-xl bg-[#21120b] px-4 py-3 text-sm font-medium text-gray-300 transition-colors hover:bg-[#2e190f]"><Search className="h-5 w-5 text-gray-400" />Search chat <span className="ml-auto text-[10px] text-gray-500">Ctrl K</span></button>
           <button type="button" onClick={() => setShowClearConfirm(true)} disabled={isProcessing} className="group flex w-full items-center gap-3 rounded-xl bg-[#21120b] px-4 py-3 text-sm font-medium text-gray-300 transition-colors hover:bg-red-500/10 hover:text-red-300 disabled:cursor-not-allowed disabled:opacity-50"><Trash2 className="h-5 w-5 text-gray-400 transition-colors group-hover:text-red-400" />Clear history</button>
         </div>
@@ -940,9 +979,9 @@ export default function AgentOTG() {
 
         {apiStatus !== 'online' && apiStatus !== 'checking' && <div className="mx-auto mt-16 flex w-[min(760px,calc(100%-2rem))] items-center gap-2 rounded-xl border border-amber-400/20 bg-amber-400/10 px-3 py-2 text-xs text-amber-100"><WifiOff className="h-4 w-4 shrink-0" /><span className="flex-1">{apiStatus === 'degraded' ? 'FastAPI is reachable, but Ollama at port 11434 is unavailable. Start Ollama and the required Qwen model, then retry.' : 'Backend unavailable at port 8000. Start the existing FastAPI server, then retry.'}</span><button type="button" onClick={() => void checkBackend()} className="rounded-lg p-1 text-amber-200 hover:bg-amber-200/10" title="Retry connection"><RotateCw className="h-4 w-4" /></button></div>}
 
-        <main className="flex min-h-0 flex-1 flex-col px-4 pt-16">
+        <main className={`flex min-h-0 flex-1 flex-col overflow-hidden px-4 pt-16 ${hasMessages ? '' : 'justify-center pb-[10vh]'}`}>
           {hasMessages ? (
-            <div className="flex-1 overflow-y-auto pb-4 pt-5"><div className="mx-auto flex w-full max-w-[820px] flex-col gap-5">
+            <div ref={scrollContainerRef} className="min-h-0 flex-1 overflow-y-auto overscroll-contain pb-4 pt-5"><div className="mx-auto flex w-full max-w-[820px] flex-col gap-5">
               {activeChat.messages.map((message) => message.role === 'user' ? (
                 <article key={message.id} className="ml-auto max-w-[85%] rounded-2xl rounded-br-md bg-[#ff6700] px-4 py-3 text-[15px] leading-6 text-[#210b01] shadow-lg shadow-[#ff6700]/10">
                   {message.documentType && <div className="mb-1.5 text-xs font-semibold uppercase tracking-wider text-[#7a2800]">{DOC_TYPES[message.documentType]?.label}</div>}
@@ -953,17 +992,17 @@ export default function AgentOTG() {
               <div ref={messageEndRef} />
             </div></div>
           ) : (
-            <div className="flex flex-1 flex-col items-center justify-center pb-16"><h1 className="mb-4 text-center text-[clamp(2rem,5vw,2.75rem)] font-normal tracking-tight text-gray-200">Ready to Ask <span className="font-medium text-[#ff6700]">Off The Grid</span>?</h1><p className="max-w-lg text-center text-sm leading-6 text-gray-500">Agent mode routes work to the right local Qwen model. Choose Chief only when you want the dedicated 14B complex-task model.</p></div>
+            <div className="mb-6 flex flex-col items-center"><h1 className="mb-4 text-center text-[clamp(2rem,5vw,2.75rem)] font-normal tracking-tight text-gray-200">Ready to Ask <span className="font-medium text-[#ff6700]">Off The Grid</span>?</h1><p className="max-w-lg text-center text-sm leading-6 text-gray-500">Agent mode routes work to the right local Qwen model. Choose Chief only when you want the dedicated 14B complex-task model.</p></div>
           )}
 
-          <div className="mx-auto w-full max-w-[820px] pb-5 pt-2">
+          <div className={`mx-auto w-full max-w-[820px] ${hasMessages ? 'pb-5 pt-2' : ''}`}>
             {attachmentNotice && <div className="mb-2 flex items-start gap-2 rounded-xl border border-amber-400/15 bg-amber-400/10 px-3 py-2 text-xs leading-5 text-amber-100"><AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" /><span>{attachmentNotice}</span><button type="button" onClick={() => setAttachmentNotice('')} className="ml-auto text-amber-200"><X className="h-3.5 w-3.5" /></button></div>}
             {attachments.length > 0 && <div className="mb-2 flex flex-wrap gap-2">{attachments.map((file, index) => <span key={`${file.name}-${file.lastModified}`} className="inline-flex max-w-full items-center gap-2 rounded-lg border border-[#ff6700]/20 bg-black/60 px-2.5 py-1.5 text-xs text-gray-300"><Paperclip className="h-3.5 w-3.5 text-[#ff6700]" /><span className="max-w-52 truncate">{file.name}</span><button type="button" onClick={() => setAttachments((current) => current.filter((_, fileIndex) => fileIndex !== index))} className="rounded text-gray-500 hover:text-red-300" title={`Remove ${file.name}`}><X className="h-3.5 w-3.5" /></button></span>)}</div>}
 
             <div className="relative flex w-full items-end gap-2 rounded-3xl border border-[#ff6700]/10 bg-black px-3 py-2 shadow-2xl shadow-[#ff6700]/5">
               {mode === 'agent' && <div ref={menuRef} className="relative mb-1 flex items-center gap-1"><button type="button" onClick={() => setIsMenuOpen((open) => !open)} className="shrink-0 rounded-full p-2 text-gray-400 transition-colors hover:bg-[#ff6700]/10 hover:text-gray-200" title="Add files to Agent mode"><Plus className="h-5 w-5" /></button>{isMenuOpen && <div className="absolute bottom-12 left-0 z-50 w-max rounded-xl border border-[#ff6700]/20 bg-[#1f110a] py-1.5 shadow-2xl"><button type="button" onClick={() => { setIsMenuOpen(false); fileInputRef.current?.click(); }} className="flex items-center gap-3 px-4 py-2 text-left text-sm font-medium text-gray-300 transition-colors hover:bg-[#ff6700]/15 hover:text-white"><Upload className="h-4 w-4 text-[#ff6700]" />Upload files for RAG</button></div>}</div>}
               <input type="file" ref={fileInputRef} onChange={handleFileChange} className="hidden" multiple />
-              <textarea ref={textareaRef} value={input} onChange={handleInput} onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); void handleSend(); } }} placeholder="What's the mission today?" rows={1} className="max-h-[200px] min-h-[40px] flex-1 resize-none overflow-y-auto bg-transparent px-2 py-2 text-[15px] leading-relaxed text-gray-100 placeholder-gray-600 outline-none" />
+              <textarea ref={textareaRef} value={input} onChange={handleInput} onKeyDown={(event) => { if (event.nativeEvent.isComposing) return; if ((event.key === 'Enter' && !event.shiftKey) || (event.key === 'Enter' && (event.ctrlKey || event.metaKey))) { event.preventDefault(); void handleSend(); } }} placeholder="What's the mission today?" rows={1} className="max-h-[200px] min-h-[40px] flex-1 resize-none overflow-y-auto bg-transparent px-2 py-2 text-[15px] leading-relaxed text-gray-100 placeholder-gray-600 outline-none" />
               <div className="mb-1 flex shrink-0 items-center gap-1.5">
                 <div ref={modeMenuRef} className="relative"><button type="button" onClick={() => setIsModeMenuOpen((open) => !open)} className="flex items-center gap-1.5 rounded-full border border-white/[0.05] bg-[#24130b] px-3 py-2 text-xs font-medium text-gray-200 transition-colors hover:bg-[#2a160d]" title="Choose model mode">{mode === 'agent' ? 'Agent' : 'Chief'}<ChevronDown className={`h-3.5 w-3.5 text-gray-400 transition-transform ${isModeMenuOpen ? 'rotate-180' : ''}`} /></button>{isModeMenuOpen && <div className="absolute bottom-11 right-0 z-50 w-72 overflow-hidden rounded-xl border border-[#ff6700]/20 bg-black py-1.5 shadow-2xl"><button type="button" onClick={() => selectMode('agent')} className={`w-full px-4 py-2.5 text-left text-sm ${mode === 'agent' ? 'bg-[#ff6700]/10 text-[#ff812b]' : 'text-gray-300 hover:bg-[#ff6700]/10 hover:text-white'}`}><span className="block font-medium">Agent — default</span><span className="mt-0.5 block text-xs text-gray-500">Smart routing: Coder, Qwen 7B, Qwen VL and RAG tools.</span></button><button type="button" onClick={() => selectMode('chief')} className={`w-full px-4 py-2.5 text-left text-sm ${mode === 'chief' ? 'bg-[#ff6700]/10 text-[#ff812b]' : 'text-gray-300 hover:bg-[#ff6700]/10 hover:text-white'}`}><span className="block font-medium">Chief — on demand</span><span className="mt-0.5 block text-xs text-gray-500">Sends only this task to Qwen 14B complex mode.</span></button></div>}</div>
                 {isProcessing ? <button type="button" onClick={handleStop} className="rounded-full bg-red-500/20 p-2.5 text-red-300 transition-colors hover:bg-red-500/30" title="Stop generation"><Square className="h-4 w-4 fill-current" /></button> : <button type="button" onClick={() => void handleSend()} disabled={!input.trim()} className="rounded-full bg-[#ff6700]/20 p-2.5 text-[#ff812b] transition-colors hover:bg-[#ff6700]/30 disabled:cursor-not-allowed disabled:opacity-35" title="Send message"><Send className="h-5 w-5" /></button>}
