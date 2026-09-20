@@ -207,7 +207,7 @@ function CopyButton({ value, copiedId, copyId, variant = 'assistant', onCopy }) 
       }
       onCopy?.(copyId);
     } catch {
-      // Ignored
+      
     }
   };
 
@@ -885,7 +885,7 @@ function DeviceSyncModal({ isOpen, onClose, initialSyncId = '', onSelectChat }) 
         <div className="border-t border-white/10 bg-black/40 px-6 py-3 flex items-center justify-between text-xs text-gray-500">
           <div className="flex items-center gap-2">
             <Radio className="h-3.5 w-3.5 text-emerald-400" />
-            <span>Agent OTG Air-Gapped Network Sync</span>
+            <span>Agent OTG Air Gapped Network Sync</span>
           </div>
           <button type="button" onClick={onClose} className="rounded-xl bg-white/10 px-4 py-1.5 text-xs font-medium text-white hover:bg-white/20">Close</button>
         </div>
