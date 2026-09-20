@@ -1,3 +1,4 @@
+
 # Agent OTG — SIH 2026
 
 100% on-premise AI assistant with smart routing, RAG document search, and local file generation (PDF, Word, Excel, PPT).
@@ -41,3 +42,6 @@ All AI processing stays on the main PC; the receiver only reads the shared resul
 - `frontend/` — React UI (showcase this, not the terminal)
 - `backend/` — FastAPI API (auto-starts with `npm run dev`)
 - `backend/ask.py` — Terminal client (optional, not needed for demo)
+
+Agent OTG
+
