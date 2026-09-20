@@ -1,5 +1,5 @@
 
-# Agent OTG — SIH 2026
+# Agent OTG 
 
 100% on-premise AI assistant with smart routing, RAG document search, and local file generation (PDF, Word, Excel, PPT).
 
